@@ -2721,9 +2721,11 @@ void panel_game_draw(LauncherModel* m, const LauncherTheme* th) {
 // ---- Save module, SAVE_MEMCARD half (PSX) -----------------------------------
 // SAVE_SRAM keeps the compact row above, folded into the GAME card (SNES,
 // unchanged). SAVE_MEMCARD (PSX) is a standalone WIDE dashboard panel (see
-// kPanelsDashboardPsx in launcher_system.h): one sub-section per card slot —
-// icon + path picker (Browse/New) + a real 15-block usage grid, matching PS1
-// memory-card conventions (each card holds 15 save blocks).
+// kPanelsDashboardPsx in launcher_system.h). The standard layout uses one
+// detailed card per slot; dashboards with Quick Mods use compact rows so the
+// enhancement switches remain visible.
+
+static const char* elide_left(const char* s, float max_w, char* out, size_t cap);
 
 // One compact memory-card slot: icon + name, inline block count, and Browse/
 // New actions. `probe` (SystemProfile.save.probe) is the host hook that
@@ -2871,6 +2873,72 @@ void draw_memcard_slot(LauncherModel* m, const LauncherTheme& th, int slot) {
     ImGui::PopID();
 }
 
+static void draw_memcard_slot_compact(LauncherModel* m,
+                                      const LauncherTheme& th, int slot) {
+    ImGui::PushID(slot);
+
+    const bool enabled = m->s.memcard_enabled[slot] != 0;
+    const uint16_t used = launcher_model_memcard_blocks_used(m, slot);
+    int used_count = 0;
+    for (int i = 0; i < 15; ++i)
+        if (used & (1u << i)) ++used_count;
+
+    bool enabled_box = enabled;
+    if (ImGui::Checkbox("##enabled", &enabled_box))
+        launcher_model_toggle_memcard(m, slot);
+    ImGui::SameLine(0, px(th.spacing_sm));
+
+    const char* path = m->s.memcard_path[slot];
+    const char* base = path;
+    for (const char* q = path; *q; ++q)
+        if (*q == '/' || *q == '\\') base = q + 1;
+
+    char label[160];
+    if (base[0])
+        snprintf(label, sizeof(label), "%s %d - %s",
+                 ui_text("Memory Card"), slot + 1, base);
+    else
+        snprintf(label, sizeof(label), "%s %d",
+                 ui_text("Memory Card"), slot + 1);
+
+    char usage[16];
+    snprintf(usage, sizeof(usage), "%d / 15", used_count);
+    const float usage_w = ImGui::CalcTextSize(usage).x;
+    const float label_w = ImGui::GetContentRegionAvail().x -
+                          usage_w - px(th.spacing_md);
+    char shown[160];
+    elide_left(label, label_w, shown, sizeof(shown));
+    ImGui::TextColored(col(enabled ? th.accent : th.text_muted), "%s", shown);
+    if (ImGui::IsItemHovered() && path[0])
+        ImGui::SetTooltip("%s", path);
+    ImGui::SameLine(0, px(th.spacing_md));
+    ImGui::TextColored(col(th.text_muted), "%s", usage);
+
+    ImGui::Dummy(ImVec2(0, px(4.0f)));
+    const float gap = px(th.spacing_sm);
+    const float button_w = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+    const float button_h = px(28.0f);
+    if (ImGui::Button(ui_text("Browse"), ImVec2(button_w, button_h))) {
+        ui_pick_file(m, "Select memory card image", {"*.mcd", "*.mcr", "*.mc"},
+                     "PS1 memory card (.mcd .mcr .mc)",
+                     [m, slot](const char* selected) {
+                         if (selected)
+                             launcher_model_set_memcard_path(m, slot, selected);
+                     });
+    }
+    ImGui::SameLine(0, gap);
+    if (ImGui::Button(ui_text("New"), ImVec2(button_w, button_h))) {
+        ui_pick_save_file(m, "Create new memory card",
+                          {"*.mcd", "*.mcr", "*.mc"},
+                          "PS1 memory card (.mcd)",
+                          [m, slot](const char* selected) {
+                              if (selected)
+                                  launcher_model_new_memcard(m, slot, selected);
+                          });
+    }
+    ImGui::PopID();
+}
+
 // Available whenever this system's SaveSpec says there's something to show:
 // SAVE_MEMCARD (PSX) always offers the panel — the memory-card slots exist
 // independent of whether the GAME itself also has legacy SRAM — while
@@ -2911,12 +2979,40 @@ void panel_save_draw(LauncherModel* m, const LauncherTheme* th) {
     const SystemProfile* prof = (const SystemProfile*)m->profile;
     const SaveKind kind = prof ? prof->save.kind : SAVE_NONE;
     if (kind == SAVE_MEMCARD) {
+        const int slots = (prof->save.slots > 0 && prof->save.slots <= 2)
+                        ? prof->save.slots : 2;
+        const float gap = px(th->spacing_sm);
+        const float avail = ImGui::GetContentRegionAvail().x;
+        if (m->dashboard_quick_controls) {
+            begin_container("mcc_quick", ImVec2(avail, px(150.0f)),
+                            ImGuiChildFlags_None);
+                if (begin_panel("mcp_quick", 0, true, false))
+                    draw_quick_mods(m, *th);
+                end_panel();
+            end_container();
+
+            ImGui::Dummy(ImVec2(0, gap));
+            begin_container("mcc_compact", ImVec2(avail, 0),
+                            ImGuiChildFlags_AutoResizeY);
+                if (begin_panel("mcp_compact", 0)) {
+                    eyebrow("MEMORY CARDS");
+                    for (int slot = 0; slot < slots; ++slot) {
+                        if (slot) {
+                            ImGui::Dummy(ImVec2(0, px(4.0f)));
+                            ImGui::Separator();
+                            ImGui::Dummy(ImVec2(0, px(4.0f)));
+                        }
+                        draw_memcard_slot_compact(m, *th, slot);
+                    }
+                }
+                end_panel();
+            end_container();
+            return;
+        }
+
         // No outer "MEMORY CARDS" card/eyebrow: the small per-slot cards ARE the
         // UI. Fixed width (same as player cards); wider windows add columns
         // instead of stretching the pair across the column.
-        const int slots = (prof->save.slots > 0 && prof->save.slots <= 2) ? prof->save.slots : 2;
-        const float gap = px(th->spacing_sm);
-        const float avail = ImGui::GetContentRegionAvail().x;
         const int cards=slots+(m->dashboard_quick_controls?1:0);
         const float cw = dash_card_width(avail, gap, cards);
         const int cols = dash_card_columns(avail, gap, cw, cards);
@@ -2974,7 +3070,6 @@ void panel_save_draw(LauncherModel* m, const LauncherTheme* th) {
 //
 // This replaces the earlier full-width row of tiles behind a modal, and the
 // one-card-per-port stack that briefly followed it.
-static const char* elide_left(const char* s, float max_w, char* out, size_t cap);  // fwd (defined below)
 
 // Real GB-cartridge art for a Transfer Pak slot, picked by the host-reported
 // cart kind (1 red / 2 blue / 3 yellow / 4 green); the gray empty shell for an
@@ -3809,10 +3904,11 @@ void draw_dashboard(LauncherModel* m, const LauncherTheme& th, int logical_w) {
                     const float right_h = row_h > px(80.0f) ? row_h : px(80.0f);
                     begin_container("dash_r", ImVec2(0, right_h),
                                     ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
-                    // Tall enough for a clean fill-height memcard pair (icon,
-                    // grid, Browse/New with padding) while controllers scroll
-                    // in the space above.
-                    const float save_reserve = save_p ? px(300.0f) : 0.0f;
+                    // Reserve enough for either the detailed card pair or the
+                    // Quick Mods plus compact memory-card rows.
+                    const float save_reserve = save_p
+                        ? px(m->dashboard_quick_controls ? 360.0f : 300.0f)
+                        : 0.0f;
                     float ctrl_h = ImGui::GetContentRegionAvail().y
                                    - save_reserve - (save_p ? gap : 0.0f);
                     if (ctrl_h < px(100.0f)) ctrl_h = px(100.0f);
